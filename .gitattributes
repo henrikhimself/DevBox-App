@@ -1,0 +1,6 @@
+# >>> pi-workbench Headroom Memory >>>
+.memory/manifest.json merge=pi-workbench-theirs
+.memory/memories/** merge=pi-workbench-theirs
+.memory/entities/** merge=pi-workbench-theirs
+.memory/relationships/** merge=pi-workbench-theirs
+# <<< pi-workbench Headroom Memory <<<

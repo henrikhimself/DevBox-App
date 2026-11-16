@@ -1,0 +1,186 @@
+# DevBox image recipe shared by the Apple Container and Docker specializations.
+# It is built from a generated per-runtime context (see
+# Common/build/prepare-context.sh) that adds the runtime's s6 hooks and the
+# verified native-architecture archives under tmp/.
+#
+# Sections are in dependency order: base packages and locales, s6-overlay,
+# the user, SSH and rootless Docker, development tools, DevBox packages,
+# and s6 service instantiation. The Makefile downloads and SHA-256-verifies
+# the s6-overlay and Node archives in tmp/ before the build.
+
+FROM debian:trixie-20261020
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Europe/Copenhagen
+ENV HOME=/root
+ENV LANG=C.UTF-8
+ENV LC_CTYPE=C.UTF-8
+
+# ===== base packages, CA, and locale =====
+
+RUN mkdir -m 755 -p \
+  /opt \
+  /data
+
+# Root CA
+COPY --chmod=444 Config/root-ca.pem /usr/local/share/ca-certificates/PersonalCA.crt
+# Procps
+COPY --chmod=644 Config/unprivileged-ports.conf /etc/sysctl.d/90-unprivileged-ports.conf
+
+RUN <<EOF1
+# Sources
+install -m 0755 -d /etc/apt/keyrings
+
+# APT
+apt-get update && apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install --no-install-recommends -y \
+  sudo procps locales tzdata ca-certificates xz-utils adduser \
+  bash curl gnupg e2fsprogs less file
+
+# Root CA
+update-ca-certificates
+
+# Locale
+sed -i '/C.UTF-8 UTF-8/d' /etc/locale.gen; echo 'C.UTF-8 UTF-8' >> /etc/locale.gen
+update-locale LANG=C.UTF-8
+
+apt-get clean && rm -rf /tmp/* /var/lib/apt/lists/* /etc/init.d/*
+EOF1
+
+# ===== s6-overlay and s6 scripts =====
+
+COPY --chmod=666 tmp/s6-overlay-noarch.tar.xz /tmp/s6-overlay-noarch.tar.xz
+COPY --chmod=666 tmp/s6-overlay-arch.tar.xz /tmp/s6-overlay-arch.tar.xz
+COPY s6-x /s6-x
+
+RUN <<EOF1
+# S6
+tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz
+tar -C / -Jxpf /tmp/s6-overlay-arch.tar.xz
+
+# S6 scripts
+chmod 750 /s6-x/*.sh
+
+rm -rf /tmp/*
+EOF1
+
+# ===== user =====
+
+RUN <<EOF1
+addgroup --gid 1000 bob
+adduser --uid 1000 --gid 1000 --disabled-password --gecos "" bob
+touch /var/mail/bob && chown bob:mail /var/mail/bob && chmod 660 /var/mail/bob
+EOF1
+
+# ===== SSH, Git/tmux, and rootless Docker =====
+
+RUN mkdir -m 755 -p \
+  /opt/ssh \
+  /opt/docker
+
+# Profiles
+COPY --chmod=755 profile.d/*.sh /etc/profile.d/
+# Home skeleton
+COPY --chmod=644 Config/tmux.conf /etc/skel/.tmux.conf
+# SSH
+COPY --chmod=644 Config/sshd_config /opt/ssh/sshd_config
+COPY --chmod=644 Config/ssh_host_ed25519_key.pub /opt/ssh/ssh_host_ed25519_key.pub
+COPY --chmod=600 Config/ssh_host_ed25519_key /opt/ssh/ssh_host_ed25519_key
+COPY --chmod=400 Config/authorized_keys /opt/ssh/authorized_keys
+# Docker
+COPY --chmod=444 Config/docker-daemon.json /opt/docker/daemon.json
+
+RUN <<EOF1
+# Sources
+. /etc/os-release
+curl -fsSL -o /tmp/docker.asc https://download.docker.com/linux/debian/gpg
+gpg --dearmor --output /etc/apt/keyrings/docker.gpg /tmp/docker.asc
+chmod 644 /etc/apt/keyrings/docker.gpg
+rm /tmp/docker.asc
+printf "deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable\n" "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/docker.list
+
+# APT
+apt-get update && apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install --no-install-recommends -y \
+  git tmux nano procps \
+  uidmap fuse-overlayfs slirp4netns iproute2 passt \
+  docker-ce docker-ce-rootless-extras docker-ce-cli docker-buildx-plugin docker-compose-plugin \
+  openssh-server
+
+
+# S6 scripts
+chmod 750 /s6-x/*.sh
+
+# SSH
+rm -rf /etc/ssh/*key* /etc/ssh/ssh*
+chown -R bob:bob /opt/ssh
+
+# Docker
+grep -qxF 'bob:100000:65536' /etc/subuid || printf '%s\n' 'bob:100000:65536' >> /etc/subuid
+grep -qxF 'bob:100000:65536' /etc/subgid || printf '%s\n' 'bob:100000:65536' >> /etc/subgid
+chown -R bob:bob /opt/docker
+
+apt-get clean && rm -rf /tmp/* /var/lib/apt/lists/*
+EOF1
+
+# ===== development tools =====
+
+# Password
+COPY --chmod=755 script/gh-pass-store.sh /usr/local/bin/gh-pass-store.sh
+
+RUN <<EOF1
+apt-get update && apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install --no-install-recommends -y \
+    git-lfs make ripgrep gnupg pinentry-tty rclone zip unzip iputils-ping dnsutils \
+    build-essential gettext-base pass pass-git-helper jq sqlite3 python3-pip python3-venv \
+    libc-bin libicu76 libnss3-tools libfontconfig1 libasound2t64 libatk-bridge2.0-0t64 \
+    libatk1.0-0t64 libatspi2.0-0t64 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libgbm1 \
+    libglib2.0-0t64 libnspr4 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 \
+    libxext6 libxfixes3 libxkbcommon0 libxrandr2 xvfb fontconfig libfreetype6 \
+    fonts-noto-color-emoji fonts-unifont fonts-liberation fonts-ipafont-gothic \
+    fonts-wqy-zenhei fonts-tlwg-loma-otf fonts-freefont-ttf xfonts-scalable
+
+apt-get clean && rm -rf /tmp/* /var/lib/apt/lists/*
+EOF1
+
+# ===== DevBox =====
+
+RUN mkdir -m 755 -p \
+  /firstrun.d
+
+# Firstrun installers
+COPY --chmod=755 firstrun.d/*.py /firstrun.d/
+COPY --chmod=755 script/install-devbox.py /usr/local/bin/devbox-install
+
+RUN <<EOF1
+set -eux
+
+# Locales
+sed -i -E 's/^#[[:space:]]+(en_US\.UTF-8[[:space:]]+UTF-8)/\1/' /etc/locale.gen
+grep -qE '^[[:space:]]*en_US\.UTF-8[[:space:]]+UTF-8' /etc/locale.gen || echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen
+locale-gen
+
+# Sudo and capabilities
+echo "bob ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/bob && chmod 440 /etc/sudoers.d/bob
+setcap cap_net_raw=ep /usr/bin/ping
+
+apt-get clean && rm -rf /tmp/* /var/lib/apt/lists/*
+EOF1
+
+# ===== s6 services =====
+
+RUN <<EOF1
+set -eux
+
+# Services
+/s6-x/s6-x-procps.sh
+/s6-x/s6-x-sshd.sh
+/s6-x/s6-x-dockerd.sh
+/s6-x/s6-x-home.sh
+# Runtime-specific services/ordering, supplied by the specialization's hook
+# (Apple: swap and swap-before-procps; Docker: none).
+/s6-x/s6-x-runtime.sh
+/s6-x/s6-add-depend.sh home sshd
+EOF1
+
+# The s6-overlay /init entrypoint starts all instantiated s6 services.
+# CMD [] (no command) keeps detached (-d, no TTY) containers alive.
+ENTRYPOINT ["/init"]
+CMD []
